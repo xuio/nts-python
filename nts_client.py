@@ -98,3 +98,22 @@ class NTSClient:
                     yield ScheduleEvent(now=now, nxt=nxt)
                     prev_id = now_id
                 await asyncio.sleep(interval) 
+
+    # ---------- show details ----------
+    async def fetch_show_details(self, aliases: list[str]) -> dict[str, dict]:
+        if not aliases:
+            return {}
+        params = [("aliases[]", a) for a in aliases]
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(f"{API_BASE}/shows", params=params,
+                                headers=HEADERS, timeout=10) as resp:
+                if resp.status != 200:
+                    return {}
+                data = await resp.json()
+                # payload is already {alias: showJson}
+                if isinstance(data, dict):
+                    return data
+                # fallback if API changes again
+                if "results" in data:
+                    return {s["show_alias"]: s for s in data["results"]}
+                return {}
