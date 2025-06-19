@@ -16,9 +16,15 @@ async def main():
     client = NTSClient()
     await client.authenticate("email", "password")
 
+    # 1) list your favourite hosts
     favs = await client.fetch_favourites()
-    print("favourites", len(favs))
 
+    # 2) fetch metadata for those shows in one request
+    aliases = [f.show_alias for f in favs]
+    show_info = await client.fetch_show_details(aliases)
+    print(show_info[aliases[0]]["name"])
+
+    # 3) listen for what's playing live on channel 1
     async for track in client.listen_live_tracks("1"):
         print(track)
 
@@ -29,6 +35,7 @@ asyncio.run(main())
 * Firebase email/password auth (async)
 * Fetch favourite shows (`fetch_favourites`)
 * Fetch favourite episodes (`fetch_favourite_episodes`)
+* Fetch show metadata (`fetch_show_details`)
 * Listen to live track updates (`listen_live_tracks`)
 * Poll schedule (`poll_schedule`)
 * Stream archive plays / history (`listen_history`)
