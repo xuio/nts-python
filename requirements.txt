@@ -1,0 +1,4 @@
+aiohttp>=3.9
+grpcio>=1.64
+grpcio-status
+google-cloud-firestore>=2.11 
