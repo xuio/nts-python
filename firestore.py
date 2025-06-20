@@ -3,7 +3,7 @@
 import asyncio, grpc
 from google.cloud.firestore_v1.services.firestore.transports.grpc_asyncio import FirestoreGrpcAsyncIOTransport
 from google.cloud.firestore_v1.types import (
-    ListenRequest, Target, StructuredQuery, RunQueryRequest, Value, ArrayValue
+    ListenRequest, Target, StructuredQuery, RunQueryRequest, Value, ArrayValue, TargetChange
 )
 from google.protobuf.wrappers_pb2 import Int32Value
 from typing import AsyncIterator, List, Dict
@@ -144,7 +144,7 @@ class AsyncFirestore:
 
     # ----- live tracks -------------------------------------------------
 
-    async def listen_live_tracks(self, pathname: str) -> AsyncIterator[Dict]:
+    async def listen_live_tracks(self, pathname: str, *, initial_snapshot: bool = True) -> AsyncIterator[Dict]:
         """Stream live-track documents with automatic reconnection.
 
         Firestore gRPC streams occasionally drop with UNAVAILABLE / time-outs when
@@ -191,8 +191,23 @@ class AsyncFirestore:
                     yield ListenRequest(database=self.database_path)
 
             try:
+                waiting = not initial_snapshot  # True => want to ignore until first live doc
+                saw_current = False
+
                 async for resp in listen_stub(req_iter(), metadata=self._metadata_database()):
-                    if resp._pb.WhichOneof("response_type") == "document_change":
+                    kind = resp._pb.WhichOneof("response_type")
+
+                    if waiting:
+                        if kind == "target_change" and resp.target_change.target_change_type == TargetChange.TargetChangeType.CURRENT:
+                            saw_current = True
+                            continue
+                        if kind == "document_change" and saw_current:
+                            waiting = False  # this is first live change
+                        else:
+                            # still part of initial snapshot – skip
+                            continue
+
+                    if kind == "document_change":
                         doc = resp.document_change.document
                         yield {k: v for k, v in doc.fields.items()}
             except grpc.aio.AioRpcError as exc:

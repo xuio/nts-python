@@ -145,11 +145,11 @@ class NTSClient:
             yield await build_payload()
 
     # ---------- live tracks ----------
-    async def listen_live_tracks(self, channel: str) -> AsyncIterator[LiveTrackEvent]:
+    async def listen_live_tracks(self, channel: str, *, initial_snapshot: bool = True) -> AsyncIterator[LiveTrackEvent]:
         if not self._fs:
             raise RuntimeError("authenticate() first")
         pathname = "/stream" if channel == "1" else "/stream2"
-        async for doc in self._fs.listen_live_tracks(pathname):
+        async for doc in self._fs.listen_live_tracks(pathname, initial_snapshot=initial_snapshot):
             print("doc", doc)
             artist_names = [v.string_value for v in doc["artist_names"].array_value.values]
             yield LiveTrackEvent(
