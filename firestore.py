@@ -84,18 +84,23 @@ class AsyncFirestore:
             limit=Int32Value(value=50),
         )
 
-        target = Target(target_id=5, query=Target.QueryTarget(parent=parent_docs, structured_query=structured))
         listen_stub = self._transport._stubs["listen"]
-
-        async def req_iter():
-            yield ListenRequest(database=self.database_path, add_target=target)
-            while True:
-                await asyncio.sleep(240)
-                yield ListenRequest(database=self.database_path)
 
         cache: dict[str, str] = {}  # doc_name -> show_alias
 
+        attempt = 0
+
         while True:
+            attempt += 1
+            tgt_id = 1000 + attempt  # unique id each connect to avoid server confusion
+            target = Target(target_id=tgt_id, query=Target.QueryTarget(parent=parent_docs, structured_query=structured))
+
+            async def req_iter():
+                yield ListenRequest(database=self.database_path, add_target=target)
+                while True:
+                    await asyncio.sleep(240)
+                    yield ListenRequest(database=self.database_path)
+
             try:
                 async for resp in listen_stub(req_iter(), metadata=self._metadata_database()):
                     typ = resp._pb.WhichOneof("response_type")
@@ -124,7 +129,8 @@ class AsyncFirestore:
                             "created_at": None,
                         }
             except grpc.aio.AioRpcError as exc:
-                if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT):
+                    # Reconnect after brief pause, generating a new target id.
                     await asyncio.sleep(2)
                     continue
                 raise
@@ -168,25 +174,29 @@ class AsyncFirestore:
             limit=Int32Value(value=12),
         )
 
-        target = Target(target_id=1, query=Target.QueryTarget(parent=parent_docs, structured_query=structured))
         listen_stub = self._transport._stubs["listen"]
 
-        async def req_iter():
-            yield ListenRequest(database=self.database_path, add_target=target)
-            # heartbeat every 4-5 minutes to keep the stream alive
-            while True:
-                await asyncio.sleep(300)
-                yield ListenRequest(database=self.database_path)
+        attempt = 0
 
         while True:
+            attempt += 1
+            tgt_id = 2000 + attempt
+            target = Target(target_id=tgt_id, query=Target.QueryTarget(parent=parent_docs, structured_query=structured))
+
+            async def req_iter():
+                yield ListenRequest(database=self.database_path, add_target=target)
+                # heartbeat every 4-5 minutes to keep the stream alive
+                while True:
+                    await asyncio.sleep(300)
+                    yield ListenRequest(database=self.database_path)
+
             try:
                 async for resp in listen_stub(req_iter(), metadata=self._metadata_database()):
                     if resp._pb.WhichOneof("response_type") == "document_change":
                         doc = resp.document_change.document
                         yield {k: v for k, v in doc.fields.items()}
             except grpc.aio.AioRpcError as exc:
-                # Reconnect on transient network errors
-                if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT):
                     await asyncio.sleep(2)
                     continue
                 raise
@@ -224,23 +234,27 @@ class AsyncFirestore:
             limit=Int32Value(value=10),
         )
 
-        target = Target(target_id=10, query=Target.QueryTarget(parent=parent_docs, structured_query=structured))
         listen_stub = self._transport._stubs["listen"]
 
-        async def req_iter():
-            yield ListenRequest(database=self.database_path, add_target=target)
-            while True:
-                await asyncio.sleep(240)
-                yield ListenRequest(database=self.database_path)
-
+        attempt = 0
         while True:
+            attempt += 1
+            tgt_id = 3000 + attempt
+            target = Target(target_id=tgt_id, query=Target.QueryTarget(parent=parent_docs, structured_query=structured))
+
+            async def req_iter():
+                yield ListenRequest(database=self.database_path, add_target=target)
+                while True:
+                    await asyncio.sleep(240)
+                    yield ListenRequest(database=self.database_path)
+
             try:
                 async for resp in listen_stub(req_iter(), metadata=self._metadata_database()):
                     if resp._pb.WhichOneof("response_type") == "document_change":
                         doc = resp.document_change.document
                         yield {k: v for k, v in doc.fields.items()}
             except grpc.aio.AioRpcError as exc:
-                if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT):
                     await asyncio.sleep(2)
                     continue
                 raise 

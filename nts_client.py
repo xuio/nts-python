@@ -150,6 +150,7 @@ class NTSClient:
             raise RuntimeError("authenticate() first")
         pathname = "/stream" if channel == "1" else "/stream2"
         async for doc in self._fs.listen_live_tracks(pathname):
+            print("doc", doc)
             artist_names = [v.string_value for v in doc["artist_names"].array_value.values]
             yield LiveTrackEvent(
                 start_time=doc["start_time"].timestamp_value,
