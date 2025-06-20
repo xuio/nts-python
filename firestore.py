@@ -129,7 +129,7 @@ class AsyncFirestore:
                             "created_at": None,
                         }
             except grpc.aio.AioRpcError as exc:
-                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT):
+                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.INTERNAL):
                     # Reconnect after brief pause, generating a new target id.
                     await asyncio.sleep(2)
                     continue
@@ -196,7 +196,7 @@ class AsyncFirestore:
                         doc = resp.document_change.document
                         yield {k: v for k, v in doc.fields.items()}
             except grpc.aio.AioRpcError as exc:
-                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT):
+                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.INTERNAL):
                     await asyncio.sleep(2)
                     continue
                 raise
@@ -254,7 +254,7 @@ class AsyncFirestore:
                         doc = resp.document_change.document
                         yield {k: v for k, v in doc.fields.items()}
             except grpc.aio.AioRpcError as exc:
-                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT):
+                if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.INTERNAL):
                     await asyncio.sleep(2)
                     continue
                 raise 
