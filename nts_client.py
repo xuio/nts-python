@@ -3,8 +3,9 @@
 import asyncio, aiohttp
 from typing import List, Dict, AsyncIterator, NamedTuple
 
-from .auth import sign_in_email_password
+from .auth import sign_in_email_password, refresh_access_token
 from .firestore import AsyncFirestore
+from . import auth
 
 PROJECT_ID = "nts-ios-app"
 API_BASE = "https://www.nts.live/api/v2"
@@ -35,6 +36,7 @@ class FavouriteEvent(NamedTuple):
 class NTSClient:
     def __init__(self):
         self._access_token = None
+        self._refresh_token = None
         self._uid = None
         self._id_token = None
         self._fs: AsyncFirestore | None = None
@@ -44,8 +46,24 @@ class NTSClient:
 
     # ---------- auth ----------
     async def authenticate(self, email: str, password: str):
-        self._access_token, self._uid, self._id_token = await sign_in_email_password(email, password)
+        self._access_token, self._uid, self._id_token, self._refresh_token = await sign_in_email_password(email, password)
         self._fs = AsyncFirestore(PROJECT_ID, self._access_token)
+
+        # start background refresh
+        if self._refresh_token:
+            self._token_task = asyncio.create_task(self._access_token_refresher())
+
+    async def _access_token_refresher(self):
+        # refresh every 50 minutes
+        while True:
+            await asyncio.sleep(50 * 60)
+            try:
+                new_tok = await refresh_access_token(self._refresh_token)
+                self._access_token = new_tok
+                if self._fs:
+                    self._fs._access_token = new_tok  # update firestore instance
+            except Exception:
+                continue
 
     # ---------- favourites ----------
     async def fetch_favourites(self) -> List[Favourite]:
