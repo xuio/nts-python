@@ -36,13 +36,30 @@ class AsyncFirestore:
 
     async def query_favourites(self, device_ids: List[str], limit: int = 50) -> List[Dict]:
         parent_docs = self.database_path + "/documents"
-        comp = StructuredQuery.Filter(
+        # Build composite filter: (device_id IN userDeviceIds) AND (episode_alias == "")
+        device_filter = StructuredQuery.Filter(
             field_filter=StructuredQuery.FieldFilter(
                 field=StructuredQuery.FieldReference(field_path="device_id"),
                 op=StructuredQuery.FieldFilter.Operator.IN,
                 value=Value(array_value=ArrayValue(values=[Value(string_value=d) for d in device_ids])),
             )
         )
+
+        show_only_filter = StructuredQuery.Filter(
+            field_filter=StructuredQuery.FieldFilter(
+                field=StructuredQuery.FieldReference(field_path="episode_alias"),
+                op=StructuredQuery.FieldFilter.Operator.EQUAL,
+                value=Value(string_value=""),  # empty string → host/show favourite (not episode)
+            )
+        )
+
+        comp = StructuredQuery.Filter(
+            composite_filter=StructuredQuery.CompositeFilter(
+                op=StructuredQuery.CompositeFilter.Operator.AND,
+                filters=[device_filter, show_only_filter],
+            )
+        )
+
         structured = StructuredQuery(
             from_=[StructuredQuery.CollectionSelector(collection_id="favourites")],
             where=comp,
@@ -54,9 +71,15 @@ class AsyncFirestore:
         favs = []
         async for resp in stub(req, metadata=self._metadata_parent(parent_docs)):
             doc = resp.document
-            if doc and doc.fields:
-                fields = doc.fields
-                favs.append({k: v for k, v in fields.items()})
+            if not doc or not doc.fields:
+                continue
+
+            # Sanity-check: skip episode favourites in case some slipped through
+            if "episode_alias" in doc.fields and doc.fields["episode_alias"].string_value:
+                continue
+
+            fields = doc.fields
+            favs.append({k: v for k, v in fields.items()})
         return favs
 
     async def listen_favourites(self, device_ids: List[str]) -> AsyncIterator[Dict]:
@@ -64,11 +87,27 @@ class AsyncFirestore:
 
         parent_docs = self.database_path + "/documents"
 
-        comp = StructuredQuery.Filter(
+        # Same composite filter as query_favourites
+        device_filter = StructuredQuery.Filter(
             field_filter=StructuredQuery.FieldFilter(
                 field=StructuredQuery.FieldReference(field_path="device_id"),
                 op=StructuredQuery.FieldFilter.Operator.IN,
                 value=Value(array_value=ArrayValue(values=[Value(string_value=d) for d in device_ids])),
+            )
+        )
+
+        show_only_filter = StructuredQuery.Filter(
+            field_filter=StructuredQuery.FieldFilter(
+                field=StructuredQuery.FieldReference(field_path="episode_alias"),
+                op=StructuredQuery.FieldFilter.Operator.EQUAL,
+                value=Value(string_value=""),
+            )
+        )
+
+        comp = StructuredQuery.Filter(
+            composite_filter=StructuredQuery.CompositeFilter(
+                op=StructuredQuery.CompositeFilter.Operator.AND,
+                filters=[device_filter, show_only_filter],
             )
         )
 
@@ -107,6 +146,11 @@ class AsyncFirestore:
 
                     if typ == "document_change":
                         doc = resp.document_change.document
+
+                        # Ignore episode favourites so they don't pollute host list
+                        if "episode_alias" in doc.fields and doc.fields["episode_alias"].string_value:
+                            continue
+
                         alias = doc.fields["show_alias"].string_value
                         cache[doc.name] = alias
                         created_at = doc.fields["created_at"].timestamp_value
@@ -138,8 +182,44 @@ class AsyncFirestore:
     # ----- favourite episodes -----------------------------------------
 
     async def query_favourite_episodes(self, device_ids: List[str], limit: int = 50) -> List[Dict]:
-        docs = await self.query_favourites(device_ids, limit*2)
-        eps = [d for d in docs if "episode_alias" in d and d["episode_alias"].string_value]
+        # We re-use the raw device query (without episode_alias filter) and
+        # then apply a local check for episode_alias ≠ "" to determine episode
+        # favourites. This avoids relying on the (newer) Firestore NOT_EQUAL
+        # operator which may not be available in all runtime environments.
+
+        parent_docs = self.database_path + "/documents"
+
+        device_filter = StructuredQuery.Filter(
+            field_filter=StructuredQuery.FieldFilter(
+                field=StructuredQuery.FieldReference(field_path="device_id"),
+                op=StructuredQuery.FieldFilter.Operator.IN,
+                value=Value(array_value=ArrayValue(values=[Value(string_value=d) for d in device_ids])),
+            )
+        )
+
+        structured = StructuredQuery(
+            from_=[StructuredQuery.CollectionSelector(collection_id="favourites")],
+            where=device_filter,
+            order_by=[
+                StructuredQuery.Order(
+                    field=StructuredQuery.FieldReference(field_path="created_at"),
+                    direction=StructuredQuery.Direction.DESCENDING,
+                )
+            ],
+            limit=Int32Value(value=limit * 2),
+        )
+
+        req = RunQueryRequest(parent=parent_docs, structured_query=structured)
+        stub = self._transport._stubs["run_query"]
+
+        eps: List[Dict] = []
+        async for resp in stub(req, metadata=self._metadata_parent(parent_docs)):
+            doc = resp.document
+            if not doc or not doc.fields:
+                continue
+            if "episode_alias" in doc.fields and doc.fields["episode_alias"].string_value:
+                eps.append({k: v for k, v in doc.fields.items()})
+
         return eps[:limit]
 
     # ----- live tracks -------------------------------------------------
