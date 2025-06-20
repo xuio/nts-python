@@ -101,19 +101,55 @@ class NTSClient:
 
     # ---------- show details ----------
     async def fetch_show_details(self, aliases: list[str]) -> dict[str, dict]:
+        """Return a mapping from show alias to the show JSON details.
+
+        The public `/shows` endpoint silently caps the number of `aliases[]`
+        parameters it will honour (currently 12).  Anything over that limit is
+        ignored, which is why callers requesting a long list see only the first
+        dozen results.  We therefore split the request into batches of 12 and
+        merge the responses client-side.
+        """
+
         if not aliases:
             return {}
-        params = [("aliases[]", a) for a in aliases]
+
+        MAX_BATCH = 12
+        uniq_aliases = list(dict.fromkeys(aliases))  # keep original order, dedup
+        shows: dict[str, dict] = {}
+
         async with aiohttp.ClientSession() as sess:
-            async with sess.get(f"{API_BASE}/shows", params=params,
-                                headers=HEADERS, timeout=10) as resp:
-                if resp.status != 200:
-                    return {}
-                data = await resp.json()
-                # payload is already {alias: showJson}
-                if isinstance(data, dict):
-                    return data
-                # fallback if API changes again
-                if "results" in data:
-                    return {s["show_alias"]: s for s in data["results"]}
-                return {}
+            for i in range(0, len(uniq_aliases), MAX_BATCH):
+                batch = uniq_aliases[i : i + MAX_BATCH]
+                params = [("aliases[]", a) for a in batch]
+
+                async with sess.get(
+                    f"{API_BASE}/shows",
+                    params=params,
+                    headers=HEADERS,
+                    timeout=10,
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+
+                # If the payload is already keyed by alias ({alias: {...}})
+                # we can merge it directly. Otherwise fall back to "results".
+                if isinstance(data, dict) and "results" not in data:
+                    shows.update(data)
+                elif "results" in data:
+                    shows.update({s["show_alias"]: s for s in data["results"]})
+
+            # ---- fallback: request missing aliases one-by-one ----
+            missing = [a for a in uniq_aliases if a not in shows]
+            for alias in missing:
+                async with sess.get(
+                    f"{API_BASE}/shows/{alias}", headers=HEADERS, timeout=10
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    show_json = await resp.json()
+                # guard – ensure basic keys exist
+                if isinstance(show_json, dict) and show_json.get("show_alias"):
+                    shows[alias] = show_json
+
+        return shows
