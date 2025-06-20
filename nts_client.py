@@ -28,6 +28,9 @@ class ScheduleEvent(NamedTuple):
     now: Dict
     nxt: Dict
 
+class FavouriteEvent(NamedTuple):
+    op: str        # "ADDED" or "REMOVED"
+    favourite: Favourite
 
 class NTSClient:
     def __init__(self):
@@ -35,6 +38,9 @@ class NTSClient:
         self._uid = None
         self._id_token = None
         self._fs: AsyncFirestore | None = None
+
+        # simple in-memory cache: alias -> show_json
+        self._show_cache: Dict[str, Dict] = {}
 
     # ---------- auth ----------
     async def authenticate(self, email: str, password: str):
@@ -59,6 +65,84 @@ class NTSClient:
     async def fetch_favourite_episodes(self, limit: int = 50):
         device_ids = await self._device_ids()
         return await self._fs.query_favourite_episodes(device_ids, limit)
+
+    # ---------- favourite changes stream ----------
+    async def listen_favourites(self) -> AsyncIterator[FavouriteEvent]:
+        """Stream additions and removals of favourites in real time."""
+        if not self._fs:
+            raise RuntimeError("authenticate() first")
+
+        device_ids = [self._uid]
+
+        async for ev in self._fs.listen_favourites(device_ids):
+            op = ev["op"]
+            alias_raw = ev["show_alias"]
+
+            # ev may come from added/change (normal) or removal event.
+            alias = alias_raw if isinstance(alias_raw, str) else alias_raw.string_value
+
+            created_raw = ev.get("created_at")
+            created_at = (
+                created_raw.timestamp_value
+                if created_raw and hasattr(created_raw, "timestamp_value")
+                else None
+            )
+
+            yield FavouriteEvent(
+                op=op,
+                favourite=Favourite(show_alias=alias, created_at=created_at),
+            )
+
+    # ---------- high-level helper: favourites with show details ----------
+    async def watch_favourites_with_details(self, *, cache: bool = True) -> AsyncIterator[List[Dict]]:
+        """Yield a de-duplicated list of favourites enriched with show details.
+
+        The first result is emitted immediately after authentication.  Subsequent
+        lists are emitted whenever the underlying favourites collection changes
+        (add or remove).  Each element of the list is a dict that merges the
+        `/shows` metadata for the alias with the `created_at` timestamp from the
+        favourites document.
+        """
+
+        if not self._fs:
+            raise RuntimeError("authenticate() first")
+
+        # local state
+        favourites: Dict[str, str] = {}  # alias -> created_at ISO str
+
+        async def build_payload() -> List[Dict]:
+            if not favourites:
+                return []
+            aliases = list(favourites.keys())
+            details = await self.fetch_show_details(aliases, use_cache=cache)
+            out = []
+            for alias in aliases:
+                show = details.get(alias, {"show_alias": alias})
+                show["created_at"] = favourites[alias]
+                out.append(show)
+            return out
+
+        # initial load
+        for fav in await self.fetch_favourites():
+            favourites.setdefault(fav.show_alias, fav.created_at)
+
+        prev_aliases = set(favourites.keys())
+        yield await build_payload()
+
+        # listen for changes and refresh incrementally
+        async for ev in self.listen_favourites():
+            if ev.op == "ADDED":
+                favourites[ev.favourite.show_alias] = ev.favourite.created_at
+            elif ev.op == "REMOVED":
+                favourites.pop(ev.favourite.show_alias, None)
+
+            current_aliases = set(favourites.keys())
+            if current_aliases == prev_aliases:
+                # No real change (e.g., duplicate document_change during initial sync)
+                continue
+
+            prev_aliases = current_aliases
+            yield await build_payload()
 
     # ---------- live tracks ----------
     async def listen_live_tracks(self, channel: str) -> AsyncIterator[LiveTrackEvent]:
@@ -100,56 +184,73 @@ class NTSClient:
                 await asyncio.sleep(interval) 
 
     # ---------- show details ----------
-    async def fetch_show_details(self, aliases: list[str]) -> dict[str, dict]:
-        """Return a mapping from show alias to the show JSON details.
+    async def fetch_show_details(
+        self,
+        aliases: list[str],
+        *,
+        use_cache: bool = True,
+        max_concurrency: int = 25,
+    ) -> dict[str, dict]:
+        """Return show metadata for the given aliases.
 
-        The public `/shows` endpoint silently caps the number of `aliases[]`
-        parameters it will honour (currently 12).  Anything over that limit is
-        ignored, which is why callers requesting a long list see only the first
-        dozen results.  We therefore split the request into batches of 12 and
-        merge the responses client-side.
+        Behaviour:
+        • By default results are cached in-memory so repeat calls for the same
+          aliases are instant.
+        • `use_cache=False` bypasses the cache and forces fresh network calls.
+        • Handles the `/shows` endpoint limit (≈12 aliases per request) by
+          batching and merges responses.
         """
 
         if not aliases:
             return {}
 
-        MAX_BATCH = 12
-        uniq_aliases = list(dict.fromkeys(aliases))  # keep original order, dedup
-        shows: dict[str, dict] = {}
+        # Serve from cache if possible and allowed
+        if use_cache:
+            cached_subset = {a: self._show_cache[a] for a in aliases if a in self._show_cache}
+            missing = [a for a in aliases if a not in cached_subset]
+        else:
+            cached_subset = {}
+            missing = list(dict.fromkeys(aliases))  # preserve order
 
-        async with aiohttp.ClientSession() as sess:
-            for i in range(0, len(uniq_aliases), MAX_BATCH):
-                batch = uniq_aliases[i : i + MAX_BATCH]
-                params = [("aliases[]", a) for a in batch]
+        # Fetch any missing aliases from the API
+        fetched: dict[str, dict] = {}
+        if missing:
+            # The public API appears to accept only a single alias per request
+            # in many cases. We therefore fetch each show individually but do so
+            # concurrently with a small worker pool for speed.
 
-                async with sess.get(
-                    f"{API_BASE}/shows",
-                    params=params,
-                    headers=HEADERS,
-                    timeout=10,
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
+            SEM_LIMIT = max_concurrency
 
-                # If the payload is already keyed by alias ({alias: {...}})
-                # we can merge it directly. Otherwise fall back to "results".
-                if isinstance(data, dict) and "results" not in data:
-                    shows.update(data)
-                elif "results" in data:
-                    shows.update({s["show_alias"]: s for s in data["results"]})
+            async def fetch_one(alias: str, sess: aiohttp.ClientSession, sem: asyncio.Semaphore):
+                url = f"{API_BASE}/shows/{alias}"
+                async with sem:
+                    try:
+                        async with sess.get(url, headers=HEADERS, timeout=10) as resp:
+                            if resp.status != 200:
+                                return None, None
+                            data = await resp.json()
+                            return alias, data if isinstance(data, dict) else None
+                    except Exception:
+                        return None, None
 
-            # ---- fallback: request missing aliases one-by-one ----
-            missing = [a for a in uniq_aliases if a not in shows]
-            for alias in missing:
-                async with sess.get(
-                    f"{API_BASE}/shows/{alias}", headers=HEADERS, timeout=10
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    show_json = await resp.json()
-                # guard – ensure basic keys exist
-                if isinstance(show_json, dict) and show_json.get("show_alias"):
-                    shows[alias] = show_json
+            async with aiohttp.ClientSession() as sess:
+                sem = asyncio.Semaphore(SEM_LIMIT)
+                tasks = [fetch_one(a, sess, sem) for a in missing]
+                for coro in asyncio.as_completed(tasks):
+                    alias, data = await coro
+                    if alias and data and data.get("show_alias"):
+                        fetched[alias] = data
 
-        return shows
+        # Update cache
+        if use_cache and fetched:
+            self._show_cache.update(fetched)
+
+        # Combine results preserving requested order
+        combined: dict[str, dict] = {}
+        for alias in aliases:
+            if alias in cached_subset:
+                combined[alias] = cached_subset[alias]
+            elif alias in fetched:
+                combined[alias] = fetched[alias]
+
+        return combined

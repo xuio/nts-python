@@ -16,13 +16,13 @@ async def main():
     client = NTSClient()
     await client.authenticate("email", "password")
 
-    # 1) list your favourite hosts
-    favs = await client.fetch_favourites()
+    # 1) subscribe to favourites list (updates automatically)
+    async for favourites in client.watch_favourites_with_details():
+        print("You now have", len(favourites), "favourites →", [s["show_alias"] for s in favourites])
 
-    # 2) fetch metadata for those shows in one request
-    aliases = [f.show_alias for f in favs]
-    show_info = await client.fetch_show_details(aliases)
-    print(show_info[aliases[0]]["name"])
+    # 2) fetch metadata for an ad-hoc list (cached by default)
+    shows = await client.fetch_show_details(["ok-williams", "peach"])  # served from cache next time
+    print(shows["ok-williams"]["name"])
 
     # 3) listen for what's playing live on channel 1
     async for track in client.listen_live_tracks("1"):
@@ -35,7 +35,10 @@ asyncio.run(main())
 * Firebase email/password auth (async)
 * Fetch favourite shows (`fetch_favourites`)
 * Fetch favourite episodes (`fetch_favourite_episodes`)
-* Fetch show metadata (`fetch_show_details`)
+* Fetch show metadata (`fetch_show_details`)  
+  * in-memory caching (on by default)  
+  * `use_cache=False` to bypass, `max_concurrency=N` to tune parallel fetches
+* Live favourites stream (`listen_favourites`) and convenience helper `watch_favourites_with_details`
 * Listen to live track updates (`listen_live_tracks`)
 * Poll schedule (`poll_schedule`)
 * Stream archive plays / history (`listen_history`)

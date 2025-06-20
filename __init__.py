@@ -22,10 +22,12 @@ asyncio.run(main())
 """
 
 from .nts_client import NTSClient, LiveTrackEvent, ScheduleEvent, Favourite
+from .nts_client import FavouriteEvent
 
 __all__ = [
     "NTSClient",
     "LiveTrackEvent",
     "ScheduleEvent",
     "Favourite",
+    "FavouriteEvent",
 ] 
